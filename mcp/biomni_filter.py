@@ -1,11 +1,8 @@
 """MCP server for selecting relevant Biomni tools."""
 
-from __future__ import annotations
-
+import asyncio
 import importlib.util
 import json
-import os
-import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -13,31 +10,56 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-try:
-    from mcp.server import MCPServer
-except ImportError:  # The public MCP SDK currently exposes FastMCP instead.
-    from mcp.server.fastmcp import FastMCP as MCPServer
+from mcp.server import MCPServer
 
 
-load_dotenv()
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    tools_uri: str = Field(min_length=1)
+    openai_api_key: str = Field(min_length=1)
+    openai_model: str = Field(min_length=1)
+    openai_base_url: str | None = None
+    mcp_log_dir: Path = Path(__file__).resolve().parent.parent / ".mcp-logs"
 
 
-def _tools_path(uri: str) -> Path:
-    parsed = urlparse(uri)
-    if parsed.scheme != "file":
-        raise ValueError(
-            f"Unsupported tools URI scheme {parsed.scheme!r}; only file:// is supported"
+settings = Settings()
+mcp = MCPServer("biomni-tool-filter")
+
+
+@mcp.tool()
+async def list_relevant_tools(prompt: str) -> str:
+    """Return JSON metadata for tools relevant to a natural-language request."""
+    request_id = uuid.uuid4().hex
+    descriptions = await asyncio.to_thread(_load_descriptions, settings.tools_uri)
+    async with AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    ) as client:
+        selected_tools = await _selected_tools(
+            prompt, descriptions, client, settings.openai_model
         )
-    if parsed.netloc not in ("", "localhost"):
-        raise ValueError("Only local file URIs are supported")
-    path = Path(unquote(parsed.path))
-    if not path.exists():
-        raise FileNotFoundError(f"Tools URI does not exist: {uri}")
-    return path
-
+    log_path = await asyncio.to_thread(
+        _write_audit_record,
+        request_id,
+        prompt,
+        settings.openai_model,
+        settings.tools_uri,
+        selected_tools,
+    )
+    print(
+        f"MCP tool selection {request_id} logged to {log_path}",
+        file=sys.stderr,
+    )
+    return json.dumps(selected_tools, ensure_ascii=False)
 
 def _load_descriptions(uri: str) -> list[dict[str, str]]:
     source = _tools_path(uri)
@@ -67,14 +89,6 @@ def _load_descriptions(uri: str) -> list[dict[str, str]]:
     return descriptions
 
 
-def _json_content(content: str) -> Any:
-    cleaned = content.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
-    if fenced:
-        cleaned = fenced.group(1)
-    return json.loads(cleaned)
-
-
 def _write_audit_record(
     request_id: str,
     prompt: str,
@@ -82,8 +96,7 @@ def _write_audit_record(
     tools_uri: str,
     selected_tools: list[dict[str, str | int]],
 ) -> Path:
-    default_log_dir = Path(__file__).resolve().parent.parent / ".mcp-logs"
-    log_dir = Path(os.environ.get("MCP_LOG_DIR", default_log_dir))
+    log_dir = settings.mcp_log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "request_id": request_id,
@@ -107,14 +120,14 @@ def _write_audit_record(
     return output_path
 
 
-def _selected_tools(
-    prompt: str, descriptions: list[dict[str, str]], client: OpenAI, model: str
+async def _selected_tools(
+    prompt: str, descriptions: list[dict[str, str]], client: AsyncOpenAI, model: str
 ) -> list[dict[str, str | int]]:
     catalog = [
         {"index": index, "name": item["name"], "description": item["description"]}
         for index, item in enumerate(descriptions)
     ]
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model,
         temperature=0,
         response_format={"type": "json_object"},
@@ -134,7 +147,7 @@ def _selected_tools(
     content = response.choices[0].message.content
     if not content:
         raise ValueError("OpenAI endpoint returned an empty tool selection")
-    result = _json_content(content)
+    result = json.loads(content)
     indices = result.get("indices") if isinstance(result, dict) else None
     if not isinstance(indices, list) or not all(isinstance(index, int) for index in indices):
         raise ValueError("OpenAI endpoint returned invalid tool indices")
@@ -143,44 +156,24 @@ def _selected_tools(
     return [item for item in catalog if item["index"] in valid_indices]
 
 
-server = MCPServer("biomni-tool-filter")
-
-
-@server.tool()
-def list_relevant_tools(prompt: str) -> str:
-    """Return JSON metadata for tools relevant to a natural-language request."""
-    request_id = uuid.uuid4().hex
-    tools_uri = os.environ.get("TOOLS_URI")
-    if not tools_uri:
-        raise RuntimeError("TOOLS_URI is not configured")
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    descriptions = _load_descriptions(tools_uri)
-    client = OpenAI(
-        api_key=api_key,
-        base_url=os.environ.get("OPENAI_BASE_URL"),
-    )
-    selected_tools = _selected_tools(prompt, descriptions, client, model)
-    log_path = _write_audit_record(
-        request_id, prompt, model, tools_uri, selected_tools
-    )
-    print(
-        f"MCP tool selection {request_id} logged to {log_path}",
-        file=sys.stderr,
-    )
-    return json.dumps(selected_tools, ensure_ascii=False)
-
-
-def main() -> None:
-    print(
-        f"Starting biomni-tool-filter; audit logs: "
-        f"{os.environ.get('MCP_LOG_DIR', Path(__file__).resolve().parent.parent / '.mcp-logs')}",
-        file=sys.stderr,
-    )
-    server.run(transport="stdio")
+def _tools_path(uri: str) -> Path:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError(
+            f"Unsupported tools URI scheme {parsed.scheme!r}; only file:// is supported"
+        )
+    if parsed.netloc not in ("", "localhost"):
+        raise ValueError("Only local file URIs are supported")
+    path = Path(unquote(parsed.path))
+    if not path.exists():
+        raise FileNotFoundError(f"Tools URI does not exist: {uri}")
+    return path
 
 
 if __name__ == "__main__":
-    main()
+    print(
+        f"Starting biomni-tool-filter; audit logs: "
+        f"{settings.mcp_log_dir}",
+        file=sys.stderr,
+    )
+    mcp.run(transport="stdio")
