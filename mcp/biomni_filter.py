@@ -45,20 +45,17 @@ async def list_relevant_tools(prompt: str) -> str:
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
     ) as client:
-        selected_tools = await _selected_tools(
-            prompt, descriptions, client, settings.openai_model
+        selected_tools = await _select_relevant_items(
+            prompt, descriptions, "tools", client, settings.openai_model
         )
-    log_path = await asyncio.to_thread(
-        _write_audit_record,
+    await _log_selection(
         request_id,
         prompt,
         settings.openai_model,
         settings.tools_uri,
         selected_tools,
-    )
-    print(
-        f"MCP tool selection {request_id} logged to {log_path}",
-        file=sys.stderr,
+        "selected_tools",
+        "tools_uri",
     )
     return json.dumps(selected_tools, ensure_ascii=False)
 
@@ -73,11 +70,10 @@ async def list_relevant_know_hows(prompt: str) -> str:
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
     ) as client:
-        selected_know_hows = await _selected_know_hows(
-            prompt, know_hows, client, settings.openai_model
+        selected_know_hows = await _select_relevant_items(
+            prompt, know_hows, "know-how documents", client, settings.openai_model
         )
-    log_path = await asyncio.to_thread(
-        _write_audit_record,
+    await _log_selection(
         request_id,
         prompt,
         settings.openai_model,
@@ -85,10 +81,6 @@ async def list_relevant_know_hows(prompt: str) -> str:
         selected_know_hows,
         "selected_know_hows",
         "know_how_uri",
-    )
-    print(
-        f"MCP know-how selection {request_id} logged to {log_path}",
-        file=sys.stderr,
     )
     return json.dumps(selected_know_hows, ensure_ascii=False)
 
@@ -146,13 +138,17 @@ def _load_descriptions(uri: str) -> list[dict[str, str]]:
     return descriptions
 
 
-async def _selected_know_hows(
+async def _select_relevant_items(
     prompt: str,
-    know_hows: list[dict[str, str | int]],
+    items: list[dict[str, str | int]],
+    item_type: str,
     client: AsyncOpenAI,
     model: str,
 ) -> list[dict[str, str | int]]:
-    catalog = know_hows
+    catalog = [
+        {"index": index, **{key: value for key, value in item.items() if key != "index"}}
+        for index, item in enumerate(items)
+    ]
     response = await client.chat.completions.create(
         model=model,
         temperature=0,
@@ -161,10 +157,10 @@ async def _selected_know_hows(
             {
                 "role": "system",
                 "content": (
-                    "Select the know-how documents relevant to the user's request. "
+                    f"Select the {item_type} relevant to the user's request. "
                     'Return only JSON in the form {"indices":[0,1]}. '
                     "Use an empty array when none apply. Do not invent indices.\n\n"
-                    "Know-how catalog:\n"
+                    f"{item_type.title()} catalog:\n"
                     + json.dumps(catalog, ensure_ascii=False)
                 ),
             },
@@ -173,20 +169,45 @@ async def _selected_know_hows(
     )
     content = response.choices[0].message.content
     if not content:
-        raise ValueError("OpenAI endpoint returned an empty know-how selection")
+        raise ValueError(f"OpenAI endpoint returned an empty {item_type} selection")
     result = json.loads(content)
     indices = result.get("indices") if isinstance(result, dict) else None
     if not isinstance(indices, list) or not all(
         isinstance(index, int) for index in indices
     ):
-        raise ValueError("OpenAI endpoint returned invalid know-how indices")
+        raise ValueError(f"OpenAI endpoint returned invalid {item_type} indices")
 
     valid_indices = set(indices)
     return [item for item in catalog if item["index"] in valid_indices]
 
 
+# Remove later. Only for testing purposes.
+async def _log_selection(
+    request_id: str,
+    prompt: str,
+    model: str,
+    source_uri: str,
+    selected_items: list[dict[str, str | int]],
+    selection_key: str = "selected_tools",
+    source_key: str = "tools_uri",
+) -> None:
+    log_path = await asyncio.to_thread(
+        _write_audit_record,
+        request_id,
+        prompt,
+        model,
+        source_uri,
+        selected_items,
+        selection_key,
+        source_key,
+    )
+    print(
+        f"MCP {selection_key.removeprefix('selected_')} selection "
+        f"{request_id} logged to {log_path}",
+        file=sys.stderr,
+    )
 
-
+# Remove later. Only for testing purposes.
 def _write_audit_record(
     request_id: str,
     prompt: str,
@@ -218,42 +239,6 @@ def _write_audit_record(
         temporary_path.unlink(missing_ok=True)
         raise RuntimeError(f"Unable to write MCP audit log: {output_path}") from error
     return output_path
-
-
-async def _selected_tools(
-    prompt: str, descriptions: list[dict[str, str]], client: AsyncOpenAI, model: str
-) -> list[dict[str, str | int]]:
-    catalog = [
-        {"index": index, "name": item["name"], "description": item["description"]}
-        for index, item in enumerate(descriptions)
-    ]
-    response = await client.chat.completions.create(
-        model=model,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Select the tools relevant to the user's request. Return only JSON "
-                    'in the form {"indices":[0,1]}. Use an empty array when none apply. '
-                    "Do not invent indices.\n\nTool catalog:\n"
-                    + json.dumps(catalog, ensure_ascii=False)
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    )
-    content = response.choices[0].message.content
-    if not content:
-        raise ValueError("OpenAI endpoint returned an empty tool selection")
-    result = json.loads(content)
-    indices = result.get("indices") if isinstance(result, dict) else None
-    if not isinstance(indices, list) or not all(isinstance(index, int) for index in indices):
-        raise ValueError("OpenAI endpoint returned invalid tool indices")
-
-    valid_indices = set(indices)
-    return [item for item in catalog if item["index"] in valid_indices]
 
 
 def _tools_path(uri: str) -> Path:
