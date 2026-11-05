@@ -7,14 +7,12 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from urllib.parse import unquote, urlparse
 
+from mcp.server import MCPServer
 from openai import AsyncOpenAI
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from mcp.server import MCPServer
 
 
 class Settings(BaseSettings):
@@ -60,12 +58,13 @@ async def list_relevant_tools(prompt: str) -> str:
     return json.dumps(selected_tools, ensure_ascii=False)
 
 
-
 @mcp.tool()
 async def list_relevant_know_hows(prompt: str) -> str:
     """Return know-how documents relevant to a natural-language request."""
     request_id = uuid.uuid4().hex
-    know_hows = await asyncio.to_thread(_load_know_hows_descriptions, settings.know_how_uri)
+    know_hows = await asyncio.to_thread(
+        _load_know_hows_descriptions, settings.know_how_uri
+    )
     async with AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -94,7 +93,9 @@ def _load_know_hows_descriptions(uri: str) -> list[dict[str, str | int]]:
         if file.name.upper() in {"README.MD", "QUICK_START.MD"}:
             continue
         content = file.read_text(encoding="utf-8")
-        title = next(line[2:].strip() for line in content.splitlines() if line.startswith("# "))
+        title = next(
+            line[2:].strip() for line in content.splitlines() if line.startswith("# ")
+        )
         short_description = next(
             (
                 line.split(":", 1)[1].strip()
@@ -102,11 +103,13 @@ def _load_know_hows_descriptions(uri: str) -> list[dict[str, str | int]]:
                 if line.lower().startswith("**short description**:")
             ),
         )
-        know_hows.append({
-            "index": len(know_hows),
-            "title": title,
-            "short_description": short_description,
-        })
+        know_hows.append(
+            {
+                "index": len(know_hows),
+                "title": title,
+                "short_description": short_description,
+            }
+        )
     return know_hows
 
 
@@ -126,14 +129,14 @@ def _load_tools_descriptions(uri: str) -> list[dict[str, str]]:
         spec.loader.exec_module(module)
         entries = getattr(module, "description", None)
         if not isinstance(entries, list):
-            raise ValueError(f"{file} must define a list named 'description'")
+            raise TypeError(f"{file} must define a list named 'description'")
         for entry in entries:
             if not isinstance(entry, dict):
-                raise ValueError(f"{file} contains a non-object tool description")
+                raise TypeError(f"{file} contains a non-object tool description")
             name = entry.get("name")
             description = entry.get("description")
             if not isinstance(name, str) or not isinstance(description, str):
-                raise ValueError(f"{file} contains a tool without name or description")
+                raise TypeError(f"{file} contains a tool without name or description")
             descriptions.append({"name": name, "description": description})
     return descriptions
 
@@ -146,7 +149,10 @@ async def _select_relevant_items(
     model: str,
 ) -> list[dict[str, str | int]]:
     catalog = [
-        {"index": index, **{key: value for key, value in item.items() if key != "index"}}
+        {
+            "index": index,
+            **{key: value for key, value in item.items() if key != "index"},
+        }
         for index, item in enumerate(items)
     ]
     response = await client.chat.completions.create(
@@ -207,6 +213,7 @@ async def _log_selection(
         file=sys.stderr,
     )
 
+
 # Remove later. Only for testing purposes.
 def _write_audit_record(
     request_id: str,
@@ -257,8 +264,7 @@ def _get_tools_path(uri: str) -> Path:
 
 if __name__ == "__main__":
     print(
-        f"Starting biomni-tool-filter; audit logs: "
-        f"{settings.mcp_log_dir}",
+        f"Starting biomni-tool-filter; audit logs: {settings.mcp_log_dir}",
         file=sys.stderr,
     )
     mcp.run(transport="stdio")
