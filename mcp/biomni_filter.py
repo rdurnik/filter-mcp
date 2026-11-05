@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     )
 
     tools_uri: str = Field(min_length=1)
+    know_how_uri: str = Field(min_length=1)
     openai_api_key: str = Field(min_length=1)
     openai_model: str = Field(min_length=1)
     openai_base_url: str | None = None
@@ -61,6 +62,46 @@ async def list_relevant_tools(prompt: str) -> str:
     )
     return json.dumps(selected_tools, ensure_ascii=False)
 
+
+
+@mcp.tool()
+async def list_relevant_know_hows(prompt: str) -> str:
+    """Return know-how documents relevant to a natural-language request."""
+    know_hows = await asyncio.to_thread(_load_know_hows, settings.know_how_uri)
+    async with AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    ) as client:
+        selected_know_hows = await _selected_know_hows(
+            prompt, know_hows, client, settings.openai_model
+        )
+    return json.dumps(selected_know_hows, ensure_ascii=False)
+
+def _load_know_hows(uri: str) -> list[dict[str, str | int]]:
+    source = _tools_path(uri)
+    files = [source] if source.is_file() else sorted(source.glob("*.md"))
+    know_hows: list[dict[str, str | int]] = []
+
+    for file in files:
+        if file.name.upper() in {"README.MD", "QUICK_START.MD"}:
+            continue
+        content = file.read_text(encoding="utf-8")
+        title = next(line[2:].strip() for line in content.splitlines() if line.startswith("# "))
+        short_description = next(
+            (
+                line.split(":", 1)[1].strip()
+                for line in content.splitlines()
+                if line.lower().startswith("**short description**:")
+            ),
+        )
+        know_hows.append({
+            "index": len(know_hows),
+            "title": title,
+            "short_description": short_description,
+        })
+    return know_hows
+
+
 def _load_descriptions(uri: str) -> list[dict[str, str]]:
     source = _tools_path(uri)
     files = [source] if source.is_file() else sorted(source.glob("*.py"))
@@ -87,6 +128,47 @@ def _load_descriptions(uri: str) -> list[dict[str, str]]:
                 raise ValueError(f"{file} contains a tool without name or description")
             descriptions.append({"name": name, "description": description})
     return descriptions
+
+
+async def _selected_know_hows(
+    prompt: str,
+    know_hows: list[dict[str, str | int]],
+    client: AsyncOpenAI,
+    model: str,
+) -> list[dict[str, str | int]]:
+    catalog = know_hows
+    response = await client.chat.completions.create(
+        model=model,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Select the know-how documents relevant to the user's request. "
+                    'Return only JSON in the form {"indices":[0,1]}. '
+                    "Use an empty array when none apply. Do not invent indices.\n\n"
+                    "Know-how catalog:\n"
+                    + json.dumps(catalog, ensure_ascii=False)
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("OpenAI endpoint returned an empty know-how selection")
+    result = json.loads(content)
+    indices = result.get("indices") if isinstance(result, dict) else None
+    if not isinstance(indices, list) or not all(
+        isinstance(index, int) for index in indices
+    ):
+        raise ValueError("OpenAI endpoint returned invalid know-how indices")
+
+    valid_indices = set(indices)
+    return [item for item in catalog if item["index"] in valid_indices]
+
+
 
 
 def _write_audit_record(
