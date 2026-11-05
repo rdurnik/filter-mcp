@@ -40,7 +40,7 @@ mcp = MCPServer("biomni-tool-filter")
 async def list_relevant_tools(prompt: str) -> str:
     """Return JSON metadata for tools relevant to a natural-language request."""
     request_id = uuid.uuid4().hex
-    descriptions = await asyncio.to_thread(_load_descriptions, settings.tools_uri)
+    descriptions = await asyncio.to_thread(_load_tools_descriptions, settings.tools_uri)
     async with AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -65,7 +65,7 @@ async def list_relevant_tools(prompt: str) -> str:
 async def list_relevant_know_hows(prompt: str) -> str:
     """Return know-how documents relevant to a natural-language request."""
     request_id = uuid.uuid4().hex
-    know_hows = await asyncio.to_thread(_load_know_hows, settings.know_how_uri)
+    know_hows = await asyncio.to_thread(_load_know_hows_descriptions, settings.know_how_uri)
     async with AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
@@ -85,8 +85,8 @@ async def list_relevant_know_hows(prompt: str) -> str:
     return json.dumps(selected_know_hows, ensure_ascii=False)
 
 
-def _load_know_hows(uri: str) -> list[dict[str, str | int]]:
-    source = _tools_path(uri)
+def _load_know_hows_descriptions(uri: str) -> list[dict[str, str | int]]:
+    source = _get_tools_path(uri)
     files = [source] if source.is_file() else sorted(source.glob("*.md"))
     know_hows: list[dict[str, str | int]] = []
 
@@ -110,8 +110,8 @@ def _load_know_hows(uri: str) -> list[dict[str, str | int]]:
     return know_hows
 
 
-def _load_descriptions(uri: str) -> list[dict[str, str]]:
-    source = _tools_path(uri)
+def _load_tools_descriptions(uri: str) -> list[dict[str, str]]:
+    source = _get_tools_path(uri)
     files = [source] if source.is_file() else sorted(source.glob("*.py"))
     descriptions: list[dict[str, str]] = []
 
@@ -241,7 +241,7 @@ def _write_audit_record(
     return output_path
 
 
-def _tools_path(uri: str) -> Path:
+def _get_tools_path(uri: str) -> Path:
     parsed = urlparse(uri)
     if parsed.scheme != "file":
         raise ValueError(
