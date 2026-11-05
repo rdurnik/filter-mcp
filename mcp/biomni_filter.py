@@ -67,6 +67,7 @@ async def list_relevant_tools(prompt: str) -> str:
 @mcp.tool()
 async def list_relevant_know_hows(prompt: str) -> str:
     """Return know-how documents relevant to a natural-language request."""
+    request_id = uuid.uuid4().hex
     know_hows = await asyncio.to_thread(_load_know_hows, settings.know_how_uri)
     async with AsyncOpenAI(
         api_key=settings.openai_api_key,
@@ -75,7 +76,22 @@ async def list_relevant_know_hows(prompt: str) -> str:
         selected_know_hows = await _selected_know_hows(
             prompt, know_hows, client, settings.openai_model
         )
+    log_path = await asyncio.to_thread(
+        _write_audit_record,
+        request_id,
+        prompt,
+        settings.openai_model,
+        settings.know_how_uri,
+        selected_know_hows,
+        "selected_know_hows",
+        "know_how_uri",
+    )
+    print(
+        f"MCP know-how selection {request_id} logged to {log_path}",
+        file=sys.stderr,
+    )
     return json.dumps(selected_know_hows, ensure_ascii=False)
+
 
 def _load_know_hows(uri: str) -> list[dict[str, str | int]]:
     source = _tools_path(uri)
@@ -175,8 +191,10 @@ def _write_audit_record(
     request_id: str,
     prompt: str,
     model: str,
-    tools_uri: str,
-    selected_tools: list[dict[str, str | int]],
+    source_uri: str,
+    selected_items: list[dict[str, str | int]],
+    selection_key: str = "selected_tools",
+    source_key: str = "tools_uri",
 ) -> Path:
     log_dir = settings.mcp_log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -185,8 +203,8 @@ def _write_audit_record(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "prompt": prompt,
         "model": model,
-        "tools_uri": tools_uri,
-        "selected_tools": selected_tools,
+        source_key: source_uri,
+        selection_key: selected_items,
     }
     output_path = log_dir / f"{request_id}.json"
     temporary_path = log_dir / f".{request_id}.tmp"
