@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     mcp_log_dir: Path = Path(__file__).resolve().parent.parent / ".mcp-logs"
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]
 mcp = MCPServer("biomni-tool-filter")
 
 
@@ -113,10 +113,10 @@ def _load_know_hows_descriptions(uri: str) -> list[dict[str, str | int]]:
     return know_hows
 
 
-def _load_tools_descriptions(uri: str) -> list[dict[str, str]]:
+def _load_tools_descriptions(uri: str) -> list[dict[str, str | int]]:
     source = _get_tools_path(uri)
     files = [source] if source.is_file() else sorted(source.glob("*.py"))
-    descriptions: list[dict[str, str]] = []
+    descriptions: list[dict[str, str | int]] = []
 
     for file in files:
         if file.name.startswith("_"):
